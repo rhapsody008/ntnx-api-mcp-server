@@ -20,6 +20,7 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ### Fixed
 - Startup no longer crashes when `LOG_DIR` is not writable (a read-only root filesystem with no mounted volume raises `OSError`/EROFS, which the previous `PermissionError` handler did not catch). File logging is skipped with a warning and stderr logging continues.
+- The container entrypoint defaults to `serve-http` when invoked with no subcommand. A deployment that overrode `args` with an empty list previously fell through to `nutanix-mcp run`, which exits 0 after printing a summary, leaving the pod in `Completed`.
 - The container entrypoint skips the spec download when `ARTIFACTS_DIR` is not writable, instead of fetching all specs and failing to write each one. Startup drops from minutes to seconds for pods that rely on bundled specs.
 
 ### Changed

@@ -150,6 +150,21 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8000/mcp          # 4
 
 Older builds crashed at startup when `/data/logs` was not writable, because the per-restart log file could not be created. Current builds degrade instead: file logging is skipped with a `file_logging_disabled` warning, and logs continue to stderr for `kubectl logs`. Rebuild from this branch if you see that traceback.
 
+### Pod status is `Completed` and the logs end with a JSON summary
+
+The container ran `nutanix-mcp run` instead of `serve-http`. `run` validates startup, prints a JSON summary and exits 0, so Kubernetes reports `Completed` rather than a crash. It happens when a deployment overrides the image `CMD` with an empty `args` list — some managed MCP platforms do this — because the CLI falls back to `run` when given no subcommand.
+
+Pass the subcommand explicitly:
+
+```yaml
+containers:
+  - name: nutanix-mcp
+    image: ghcr.io/rhapsody008/ntnx-api-mcp-server:latest
+    args: ["serve-http"]
+```
+
+Current images default to `serve-http` when `args` is empty and log `no subcommand given: defaulting to serve-http`, so this only affects older builds or an `args` list that names a different subcommand.
+
 ### Startup takes minutes before the port opens
 
 With `INIT_ON_START=true` and no writable volume at `/data/artifacts`, the entrypoint used to download all 20 specs and fail to write every one — roughly two wasted minutes per restart. It now detects the unwritable directory and serves the bundled specs immediately. Either outcome is safe, but for a pod with no artifacts volume set `INIT_ON_START: "false"` to make the intent explicit.

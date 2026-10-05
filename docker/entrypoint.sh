@@ -18,4 +18,12 @@ else
     || echo "init failed; falling back to existing or bundled specs" >&2
 fi
 
+# The image CMD is "serve-http". A deployment that overrides args with an empty
+# list would otherwise fall through to `nutanix-mcp run`, which validates startup,
+# prints a JSON summary and exits 0 — a server container that reports Completed.
+if [ "$#" -eq 0 ]; then
+  echo "no subcommand given: defaulting to serve-http" >&2
+  set -- serve-http
+fi
+
 exec nutanix-mcp "$@"

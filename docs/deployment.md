@@ -142,7 +142,7 @@ A multi-stage, non-root `Dockerfile` is committed at the repository root. The im
 | Bundled specs | Latest-release YAMLs baked into `/app/src/artifacts/default_specs` (`--build-arg BAKE_SPECS=false` to skip) |
 | Runtime dirs | `ARTIFACTS_DIR=/data/artifacts`, `LOG_DIR=/data/logs` |
 | Entrypoint | [`docker/entrypoint.sh`](../docker/entrypoint.sh): runs `nutanix-mcp init` when `INIT_ON_START=true` (default) **and** `ARTIFACTS_DIR` is writable, then `exec nutanix-mcp "$@"` |
-| Default command | `serve-http` on `0.0.0.0:8000`, path `/mcp` |
+| Default command | `serve-http` on `0.0.0.0:8000`, path `/mcp` (also the fallback when `args` is empty) |
 
 The editable install is deliberate: bundled-spec paths resolve relative to `src/config/settings.py`, and a regular install would move them into `site-packages`.
 
