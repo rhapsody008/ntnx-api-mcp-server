@@ -274,9 +274,24 @@ class RuntimeToolDispatcher:
         Returns an error dict when the ETag lookup fails, otherwise ``None``. When no
         matching GET operation exists the request proceeds unchanged and Prism Central
         reports the missing If-Match as before.
+
+        When the spec declares If-Match, the ETag is required, so a failed lookup is
+        returned as an error rather than sending a request that cannot succeed. When
+        If-Match is only implied (``effective_parameters`` adds it for every non-GET),
+        a failed lookup proceeds without the header: the operation may not need one,
+        and Prism Central stays the authority on that.
         """
+        declared_if_match = any(
+            p.location == "header" and p.name.lower() == "if-match"
+            for p in operation.parameters
+        )
+        # effective_parameters adds an implicit If-Match on non-GET operations, so
+        # actions whose spec omits it (vmm v4.3 ahv associate-categories) still qualify.
         if_match = next(
-            (p for p in operation.parameters if p.location == "header" and p.name.lower() == "if-match"),
+            (
+                p for p in effective_parameters(operation)
+                if p.location == "header" and p.name.lower() == "if-match"
+            ),
             None,
         )
         if if_match is None or any(key.lower() == "if-match" for key in headers):
@@ -298,20 +313,35 @@ class RuntimeToolDispatcher:
                 path_params={k: v for k, v in path_params.items() if k in source_path_names},
             )
         except Exception as exc:
-            return {
-                "code": "auto_etag_failed",
-                "detail": f"ETag lookup via '{source.registered_name}' failed: {exc}",
-            }
+            if declared_if_match:
+                return {
+                    "code": "auto_etag_failed",
+                    "detail": f"ETag lookup via '{source.registered_name}' failed: {exc}",
+                }
+            LOGGER.warning(
+                "event=auto_etag_skipped operation=%s source=%s reason=lookup_failed error=%s",
+                operation.registered_name,
+                source.registered_name,
+                exc,
+            )
+            return None
 
         etag = current.get("_etag") if isinstance(current, dict) else None
         if not etag:
-            return {
-                "code": "auto_etag_failed",
-                "detail": (
-                    f"ETag lookup via '{source.registered_name}' returned no _etag. "
-                    f"Response: {str(current)[:500]}"
-                ),
-            }
+            if declared_if_match:
+                return {
+                    "code": "auto_etag_failed",
+                    "detail": (
+                        f"ETag lookup via '{source.registered_name}' returned no _etag. "
+                        f"Response: {str(current)[:500]}"
+                    ),
+                }
+            LOGGER.warning(
+                "event=auto_etag_skipped operation=%s source=%s reason=no_etag_in_response",
+                operation.registered_name,
+                source.registered_name,
+            )
+            return None
 
         headers[if_match.name] = etag
         LOGGER.info(

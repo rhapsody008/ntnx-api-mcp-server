@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.config import Settings
+from src.generators import ToolGenerator
 from src.parsers import OperationInfo, ParameterInfo
 from src.server import StartupLoadResult
 from src.tools import RuntimeToolDispatcher
@@ -563,3 +564,112 @@ def test_operation_schema_if_match_guidance_reflects_auto_etag() -> None:
 
     assert "Auto-fetched by the server" in _if_match(on)
     assert "headers: {'If-Match'" in _if_match(off)
+
+
+def test_auto_etag_fires_when_spec_omits_if_match(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # vmm v4.3 omits If-Match on ahv associate-categories, but Prism still requires it.
+    associate = _associate_categories_operation()
+    associate.parameters = [p for p in associate.parameters if p.name != "If-Match"]
+    dispatcher = _dispatcher_for(
+        [_get_vm_operation(), _update_vm_operation(), associate], read_only_mode=False, auto_etag=True
+    )
+    calls = _capture_requests(monkeypatch, dispatcher, responses=[{"_etag": "etag-9"}, {"data": {}}])
+
+    result = dispatcher.call_tool(
+        "vmm_execute",
+        {
+            "operation": "associateCategories",
+            "path_params": {"extId": "vm-1"},
+            "request_body": {"categories": [{"extId": "cat-1"}]},
+        },
+    )
+    assert result.ok is True
+    assert [c["method"] for c in calls] == ["GET", "POST"]
+    assert calls[1]["headers"]["If-Match"] == "etag-9"
+
+
+def test_schema_lists_implicit_if_match_for_action_with_auto_etag() -> None:
+    associate = _associate_categories_operation()
+    associate.parameters = [p for p in associate.parameters if p.name != "If-Match"]
+    generator = ToolGenerator(
+        [_get_vm_operation(), associate], schemas={}, namespace_metadata={}, auto_etag=True
+    )
+    schema = generator.get_operation_schema("associateCategories")
+    if_match = [h for h in schema["header_parameters"] if h["name"] == "If-Match"]
+    assert if_match and "Auto-fetched" in if_match[0]["auto_managed"]
+
+
+def test_auto_etag_skips_collection_action(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """An action on a collection has no ETag: its sibling GET is a list endpoint.
+
+    Mirrors vmm importImage (/content/images/$actions/import), which must not be
+    blocked by an ETag lookup against listImages.
+    """
+    import_image = OperationInfo(
+        namespace="vmm",
+        operation_id="importImage",
+        path="/vmm/v4.3/content/images/$actions/import",
+        method="POST",
+        summary="Import image",
+        description="Import image",
+        request_body={"content": {"application/json": {"schema": {"type": "object"}}}},
+    )
+    list_images = OperationInfo(
+        namespace="vmm",
+        operation_id="listImages",
+        path="/vmm/v4.3/content/images",
+        method="GET",
+        summary="List images",
+        description="List images",
+    )
+    dispatcher = _dispatcher_for([list_images, import_image], read_only_mode=False, auto_etag=True)
+    calls = _capture_requests(monkeypatch, dispatcher)
+
+    result = dispatcher.call_tool(
+        "vmm_execute", {"operation": "importImage", "request_body": {"name": "img"}}
+    )
+
+    assert result.ok is True
+    # No ETag pre-fetch, and nothing injected.
+    assert [c["method"] for c in calls] == ["POST"]
+    assert "If-Match" not in calls[0]["headers"]
+
+
+def test_auto_etag_proceeds_when_implicit_and_no_etag_found(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """An inferred If-Match must not block the write when no ETag can be found."""
+    associate = _associate_categories_operation()
+    associate.parameters = [p for p in associate.parameters if p.name != "If-Match"]
+    dispatcher = _dispatcher_for(
+        [_get_vm_operation(), associate], read_only_mode=False, auto_etag=True
+    )
+    calls = _capture_requests(monkeypatch, dispatcher, responses=[{"data": {"extId": "vm-1"}}])
+
+    result = dispatcher.call_tool(
+        "vmm_execute",
+        {
+            "operation": "associateCategories",
+            "path_params": {"extId": "vm-1"},
+            "request_body": {"categories": []},
+        },
+    )
+
+    assert result.ok is True
+    assert [c["method"] for c in calls] == ["GET", "POST"]
+    assert "If-Match" not in calls[1]["headers"]
+
+
+def test_auto_etag_still_fails_hard_when_spec_declares_if_match(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A spec-declared If-Match is mandatory, so a failed lookup is still an error."""
+    dispatcher = _dispatcher_for(
+        [_get_vm_operation(), _update_vm_operation()], read_only_mode=False, auto_etag=True
+    )
+    calls = _capture_requests(monkeypatch, dispatcher, responses=[{"data": {"no": "etag"}}])
+
+    result = dispatcher.call_tool(
+        "vmm_execute",
+        {"operation": "updateVmById", "path_params": {"extId": "vm-1"}, "request_body": {"name": "x"}},
+    )
+
+    assert result.ok is False
+    assert result.error["code"] == "auto_etag_failed"
+    assert [c["method"] for c in calls] == ["GET"]

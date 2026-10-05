@@ -423,7 +423,12 @@ class ToolGenerator:
         query_params: list[dict[str, Any]] = []
         header_params: list[dict[str, Any]] = []
 
-        for param in op.parameters:
+        # Surface the implicit If-Match (see effective_parameters) only where an ETag
+        # source GET exists, so create-style POSTs are not told to send an ETag.
+        listed = list(op.parameters)
+        if self.find_etag_source_operation(op) is not None:
+            listed = effective_parameters(op)
+        for param in listed:
             formatted = self._format_param(param)
             if param.location == "path":
                 path_params.append(formatted)
@@ -521,6 +526,11 @@ class ToolGenerator:
         """
         if _ACTION_SUFFIX_RE.search(op.path):
             resource_path = _ACTION_SUFFIX_RE.sub("", op.path)
+            # An action on a collection (e.g. /content/images/$actions/import) has no
+            # ETag to read: the sibling GET is a list endpoint, whose response carries
+            # no _etag. Only an item path (ending in a path parameter) has one.
+            if not resource_path.endswith("}"):
+                return None
         elif op.method.upper() in ("PUT", "PATCH"):
             resource_path = op.path
         else:

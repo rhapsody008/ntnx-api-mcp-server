@@ -19,6 +19,15 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 - GitHub Actions workflow that tests, builds, smoke-tests and publishes the container image to GHCR, tagging `:latest` and the commit sha.
 
 ### Fixed
+- `AUTO_ETAG` now fires for writes whose spec omits `If-Match`, which includes the AHV
+  category and power actions in vmm v4.3 (`ahv_associateCategories`, `ahv_powerOnVm` and
+  38 others). Prism Central enforces the ETag on these regardless of the spec, so
+  auto-injection previously never ran for the operations that need it most.
+- An action on a collection (`/content/images/$actions/import`) no longer attempts an
+  ETag lookup against its sibling list endpoint, which has no `_etag` to return.
+- A failed ETag lookup is only fatal when the spec declares `If-Match`. When `If-Match`
+  is merely inferred, the request proceeds without the header and Prism Central remains
+  the authority on whether it was required.
 - Startup no longer crashes when `LOG_DIR` is not writable (a read-only root filesystem with no mounted volume raises `OSError`/EROFS, which the previous `PermissionError` handler did not catch). File logging is skipped with a warning and stderr logging continues.
 - The container entrypoint defaults to `serve-http` when invoked with no subcommand. A deployment that overrode `args` with an empty list previously fell through to `nutanix-mcp run`, which exits 0 after printing a summary, leaving the pod in `Completed`.
 - The container entrypoint skips the spec download when `ARTIFACTS_DIR` is not writable, instead of fetching all specs and failing to write each one. Startup drops from minutes to seconds for pods that rely on bundled specs.
