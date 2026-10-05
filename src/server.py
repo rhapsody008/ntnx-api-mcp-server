@@ -93,6 +93,7 @@ def load_operations_from_yamls(settings: Settings) -> StartupLoadResult:
         operations,
         schemas=combined_schemas,
         namespace_metadata=namespace_metadata,
+        auto_etag=settings.auto_etag,
     )
     namespace_tools = generator.build_namespace_tools()
     discovery_tools = generator.build_discovery_tools()

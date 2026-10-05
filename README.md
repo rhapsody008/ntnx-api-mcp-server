@@ -22,6 +22,7 @@ Once connected, an AI assistant like Claude or Cursor can discover available Nut
 | Evaluating whether this covers your use case | [Feature Spotlight](docs/feature-spotlight.md) — all 19 namespace profiles and example interactions |
 | A developer getting started | [Quickstart guide](docs/quickstart.md) — install, configure, and first tool call |
 | An IT security reviewer | [Authentication and security guide](docs/authentication.md) — credentials, permissions, network exposure, security hardening checklist |
+| Running it as a shared HTTP service (Open WebUI, Kubernetes) | [Kubernetes deployment guide](docs/k8s-deployment.md) — image, manifests, probes, canary checks |
 | Returning after an update | [Changelog](CHANGELOG.md) — what changed and whether configuration needs updating |
 
 ---
@@ -97,6 +98,9 @@ Key variables:
 - `PC_API_KEY` — API key sent as `X-ntnx-api-key` (alternative to username/password; takes priority if both are set)
 - `PC_INSECURE=false` — enforces TLS verification by default; set to `true` only for dev/lab with self-signed certificates
 - `READ_ONLY_MODE=true` — blocks all non-GET operations server-side (default; set to `false` to opt in to write operations)
+- `STRICT_PARAMS=true` — unknown parameter keys return `unknown_parameter` instead of being silently dropped (default)
+- `AUTO_ETAG=false` — when `true`, the server fetches `If-Match` itself for writes that need it
+- `MCP_HTTP_HOST` / `MCP_HTTP_PORT` / `MCP_HTTP_PATH` / `MCP_AUTH_TOKEN` / `MCP_STATELESS` — Streamable HTTP transport (`serve-http`)
 - `ARTIFACTS_DIR` — **must be an absolute path** when set in AI client config files
 
 For all configuration options, defaults, and validation behavior: [configuration reference](docs/configuration.md).
@@ -141,11 +145,21 @@ Starts the MCP stdio server. AI clients (Cursor, Claude Desktop) invoke this aut
 nutanix-mcp serve-stdio
 ```
 
+### `nutanix-mcp serve-http [--host H] [--port P] [--path /mcp]`
+
+Starts the MCP Streamable HTTP server for remote clients such as Open WebUI, with `/healthz` and `/readyz` probes. Each flag falls back to `MCP_HTTP_HOST` / `MCP_HTTP_PORT` / `MCP_HTTP_PATH`. Set `MCP_AUTH_TOKEN` to require `Authorization: Bearer <token>`.
+
+```bash
+MCP_AUTH_TOKEN=$(openssl rand -base64 32) nutanix-mcp serve-http --port 8000
+```
+
+A container image and Kubernetes manifests are provided: see [deployment](docs/deployment.md#3-docker) and the [Kubernetes guide](docs/k8s-deployment.md).
+
 ---
 
 ## Connecting to AI clients
 
-The server communicates over **stdio**. Any MCP-compatible client that supports subprocess-based stdio transport can connect by pointing its config at the `nutanix-mcp serve-stdio` command with credentials passed as environment variables.
+The server communicates over **stdio** (`serve-stdio`) or **Streamable HTTP** (`serve-http`). For HTTP, point the client at `http://<host>:8000/mcp` with the bearer token. For stdio, any MCP-compatible client that supports subprocess-based stdio transport can connect by pointing its config at the `nutanix-mcp serve-stdio` command with credentials passed as environment variables.
 
 For step-by-step config for Cursor, Claude Desktop, MCP Inspector, and custom Python clients — including exact JSON blocks, absolute path requirements, and verification steps — see the [integration guide](docs/integration.md).
 
@@ -168,14 +182,19 @@ These 4 tools are always registered regardless of which namespace artifacts are 
 
 ### Namespace execution tools
 
-Each namespace has a corresponding `<namespace>_execute` tool registered at startup from the downloaded YAML artifacts. Two parameters apply to every call:
+Each namespace has a corresponding `<namespace>_execute` tool registered at startup from the downloaded YAML artifacts. Its input schema declares:
 
 | Parameter | Type | Description |
 |---|---|---|
 | `operation` | string (**required**) | The operation id to call |
+| `path_params` | object | Path parameters by exact name, e.g. `{"extId": "<uuid>"}` |
+| `query_params` | object | Query parameters by exact name, e.g. `{"$filter": "startswith(name,'zy-')", "$limit": 100}` |
+| `headers` | object | Header parameters, e.g. `{"If-Match": "<_etag from GET>"}` |
 | `request_body` | object | JSON body for POST / PUT / PATCH payloads — omit for GET / DELETE |
 
-List and search operations additionally accept OData query parameters:
+Values are routed by each parameter's location in the spec, so a key placed in the wrong bucket still reaches the right place. Legacy clients may still send parameters as flat top-level keys. With `STRICT_PARAMS=true` (default), a key that matches no parameter returns `unknown_parameter` with the accepted names.
+
+OData parameters are accepted as `$filter`, the legacy underscore alias, or the bare name (`filter`):
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -236,7 +255,8 @@ Set `LOG_FORMAT=json` for structured JSON output suitable for log aggregation pi
 - **At least one auth method is required** — the server fails startup if neither `PC_API_KEY` nor `PC_USERNAME`/`PC_PASSWORD` is set when `PC_HOST` is configured.
 - **TLS verification** is enforced by default (`PC_INSECURE=false`). Set `PC_INSECURE=true` only for dev or lab environments running Prism Central with self-signed certificates.
 - **Secrets are never logged** — `PC_PASSWORD` and `PC_API_KEY` are stored as `SecretStr` and masked in all log output.
-- **Input validation** — all tool call payloads are validated against the operation contract before execution. Unknown fields are rejected with a structured error.
+- **Input validation** — all tool call payloads are validated against the operation contract before execution. With `STRICT_PARAMS=true` (default), unknown parameter keys are rejected with a structured `unknown_parameter` error.
+- **HTTP transport** — `serve-http` binds to `127.0.0.1` by default. Set `MCP_AUTH_TOKEN` and put TLS in front of it before exposing it more widely.
 
 For the full attack surface analysis, role requirements, and security hardening checklist: [authentication and security guide](docs/authentication.md).
 

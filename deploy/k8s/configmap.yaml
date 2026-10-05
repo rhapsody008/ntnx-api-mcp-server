@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nutanix-mcp-config
+data:
+  # Prism Central: IP or FQDN, no scheme. Port 9440 means https; any other port means http.
+  PC_HOST: "171.16.0.10"
+  PC_PORT: "9440"
+  # true only for a lab PC with a self-signed certificate.
+  PC_INSECURE: "true"
+  # Start read-only; flip to "false" once the canary passes.
+  READ_ONLY_MODE: "true"
+  # Unknown parameter keys become unknown_parameter errors instead of silent drops.
+  STRICT_PARAMS: "true"
+  # The server fetches If-Match itself when the caller omits it.
+  AUTO_ETAG: "true"
+  MCP_HTTP_HOST: "0.0.0.0"
+  MCP_HTTP_PORT: "8000"
+  MCP_HTTP_PATH: "/mcp"
+  # Required for more than one replica without sticky sessions.
+  MCP_STATELESS: "true"
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"
+  # Run `nutanix-mcp init` before serving (needs egress to developers.nutanix.com).
+  INIT_ON_START: "true"
+  # Fewer namespaces = faster startup and a smaller tool list.
+  # NAMESPACE_OVERRIDE_LIST: "vmm,prism,clustermgmt,networking"
+  # Only when mirroring developers.nutanix.com.
+  # NAMESPACE_SOURCE_URL: "https://developers.nutanix.com/api/v1/namespaces"

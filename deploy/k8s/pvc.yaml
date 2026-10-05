@@ -1,0 +1,11 @@
+# Keeps downloaded specs across restarts so INIT_ON_START is a fast no-op.
+# Replace with an emptyDir in deployment.yaml if specs should be re-fetched every start.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nutanix-mcp-artifacts
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi

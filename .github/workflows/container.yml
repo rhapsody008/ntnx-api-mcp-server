@@ -1,0 +1,195 @@
+name: Build and publish container
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    # Docs and manifests do not affect the image; PRs touching only those skip the build.
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "deploy/**"
+      - ".github/ISSUE_TEMPLATE/**"
+  workflow_dispatch:
+    inputs:
+      tag_latest:
+        description: "Also move the :latest tag to this build"
+        type: boolean
+        default: true
+      bake_specs:
+        description: "Bake latest-release API specs into the image (needs egress to developers.nutanix.com)"
+        type: boolean
+        default: true
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e . && pip install pytest
+      - run: pytest -q
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image name and tags
+        id: meta
+        env:
+          # A fork may have uppercase characters; GHCR repository names must be lowercase.
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          INPUT_TAG_LATEST: ${{ inputs.tag_latest }}
+          INPUT_BAKE_SPECS: ${{ inputs.bake_specs }}
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/$(printf '%s' "$REPO" | tr '[:upper:]' '[:lower:]')"
+          short_sha="$(git rev-parse --short HEAD)"
+
+          # Tag logic is kept in shell: GitHub expressions treat a false boolean input
+          # as falsy, so `inputs.x || default` silently ignores an explicit "false".
+          bake_specs=true
+          tag_latest=false
+          case "$EVENT" in
+            workflow_dispatch)
+              tag_latest="$INPUT_TAG_LATEST"
+              bake_specs="$INPUT_BAKE_SPECS"
+              ;;
+            push)
+              # Both a main push and a release tag move :latest.
+              tag_latest=true
+              ;;
+          esac
+
+          # :latest comes first — it is the tag deploy/k8s/deployment.yaml pulls.
+          tags=""
+          if [ "$tag_latest" = "true" ]; then
+            tags="${image}:latest"
+          fi
+          tags="${tags}${tags:+$'\n'}${image}:${short_sha}"
+          case "$GITHUB_REF" in
+            refs/tags/v*) tags="${tags}"$'\n'"${image}:${GITHUB_REF#refs/tags/}" ;;
+          esac
+
+          {
+            echo "bake_specs=${bake_specs}"
+            echo "smoke_tag=${image}:${short_sha}"
+            echo "tags<<__TAGS__"
+            echo "${tags}"
+            echo "__TAGS__"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Image tags to publish:"
+          echo "${tags}"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Build into the local daemon first so the image is smoke-tested before it is
+      # pushed. The push step then uploads this exact image, not a second build.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ${{ steps.meta.outputs.smoke_tag }}
+          build-args: |
+            BAKE_SPECS=${{ steps.meta.outputs.bake_specs }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Smoke test the image
+        env:
+          IMAGE: ${{ steps.meta.outputs.smoke_tag }}
+        run: |
+          set -euo pipefail
+          # Same hardening as the Kubernetes Deployment. INIT_ON_START=false means
+          # readiness proves the baked-in bundled specs load with no network access.
+          docker run -d --name smoke -p 18000:8000 \
+            --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
+            --user 10001:10001 \
+            --tmpfs /data/artifacts:uid=10001,gid=10001 \
+            --tmpfs /data/logs:uid=10001,gid=10001 \
+            -e INIT_ON_START=false \
+            -e MCP_AUTH_TOKEN=smoke-token \
+            "$IMAGE"
+          trap 'echo "--- container logs ---"; docker logs smoke 2>&1 | tail -40; docker rm -f smoke >/dev/null 2>&1 || true' EXIT
+
+          ready=""
+          for _ in $(seq 1 60); do
+            ready="$(curl -fsS localhost:18000/readyz 2>/dev/null || true)"
+            [ -n "$ready" ] && break
+            sleep 2
+          done
+          echo "readyz: ${ready:-<empty>}"
+
+          curl -fsS localhost:18000/healthz | grep -q '"ok"'
+
+          # A ready server with zero operations means the spec bake silently failed.
+          count="$(printf '%s' "${ready:-}" | sed -n 's/.*"operation_count":\([0-9]*\).*/\1/p')"
+          if [ -z "$count" ] || [ "$count" -lt 1 ]; then
+            echo "::error::Server never became ready with loaded operations (readyz: ${ready:-<empty>})"
+            exit 1
+          fi
+          echo "Loaded ${count} operations from bundled specs."
+
+          # The MCP endpoint must reject a call that carries no bearer token.
+          code="$(curl -s -o /dev/null -w '%{http_code}' -X POST localhost:18000/mcp)"
+          if [ "$code" != "401" ]; then
+            echo "::error::Expected 401 on /mcp without a token, got ${code}"
+            exit 1
+          fi
+          echo "Unauthenticated /mcp correctly returned 401."
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        if: github.event_name != 'pull_request'
+        env:
+          SMOKE_TAG: ${{ steps.meta.outputs.smoke_tag }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$TAGS" | while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            docker tag "$SMOKE_TAG" "$tag"
+            docker push "$tag"
+          done
+
+      - name: Summary
+        if: github.event_name != 'pull_request'
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "### Published tags"
+            echo '```'
+            printf '%s\n' "$TAGS"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

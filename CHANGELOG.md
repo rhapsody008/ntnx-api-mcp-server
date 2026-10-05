@@ -4,6 +4,26 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 
 ---
 
+## [Unreleased]
+
+### Added
+- Declared `path_params`, `query_params` and `headers` objects on every `<namespace>_execute` tool, so strict MCP clients (e.g. Open WebUI) forward parameters instead of dropping them. Flat top-level keys still work.
+- Parameter values are routed by the spec's parameter location, regardless of the bucket used. OData names also accept the bare form (`filter` for `$filter`), and header names match case-insensitively.
+- `STRICT_PARAMS` (default `true`): unknown parameter keys return `unknown_parameter`, listing the accepted names, instead of being silently dropped.
+- `AUTO_ETAG` (default `false`): for PUT/PATCH and `$actions` operations that require `If-Match`, the server fetches the resource ETag itself when the caller omits it.
+- `If-Match` is accepted and forwarded on every non-GET operation, even when the spec omits it (e.g. `ahv_associateCategories` in vmm v4.3).
+- `getOperationSchema` returns a `how_to_pass` map from parameter group to bucket.
+- Streamable HTTP transport: `nutanix-mcp serve-http` with `/healthz`, `/readyz`, optional bearer auth (`MCP_AUTH_TOKEN`) and stateless mode (`MCP_STATELESS`).
+- Global `--read-only` and `--no-save-dotenv` CLI flags.
+- `Dockerfile`, `docker/entrypoint.sh`, `Makefile` and Kustomize manifests in `deploy/k8s/`.
+- GitHub Actions workflow that tests, builds, smoke-tests and publishes the container image to GHCR, tagging `:latest` and the commit sha.
+
+### Changed
+- Minimum `mcp` version is now 1.8.0.
+- Tool calls are dispatched in a worker thread so Prism Central requests do not block the event loop.
+
+---
+
 ## [0.8] — Initial release
 
 ### Added

@@ -7,11 +7,49 @@ import re
 from typing import Any
 
 from src.generators.models import OperationDiscoveryItem, ToolAnnotations, ToolDefinition, ToolInputSchema
+from src.generators.param_routing import (
+    PARAM_BUCKETS,
+    RESERVED_KEYS,
+    bucket_for_location,
+    effective_parameters,
+    is_accepted_key,
+    iter_supplied_keys,
+)
 from src.generators.schema_resolver import SchemaResolver
 from src.parsers import OperationInfo, ParameterInfo
 from src.parsers.yaml_parser import NamespaceMetadata, _camel_to_tokens
 
 _VERSION_RE = re.compile(r"^v\d+", re.IGNORECASE)
+_ACTION_SUFFIX_RE = re.compile(r"/\$actions/[^/]+$")
+
+# Declared parameter buckets on every ``<namespace>_execute`` tool.
+_BUCKET_PROPERTIES: dict[str, dict[str, Any]] = {
+    "path_params": {
+        "type": "object",
+        "additionalProperties": True,
+        "description": (
+            "Path parameters (getOperationSchema path_parameters), keyed by exact name. "
+            'Example: {"extId": "<uuid>"}'
+        ),
+    },
+    "query_params": {
+        "type": "object",
+        "additionalProperties": True,
+        "description": (
+            "Query parameters (getOperationSchema query_parameters), keyed by exact name "
+            "including the '$' prefix. Example: "
+            '{"$filter": "startswith(name,\'zy-\')", "$select": "extId,name,categories", "$limit": 100}'
+        ),
+    },
+    "headers": {
+        "type": "object",
+        "additionalProperties": True,
+        "description": (
+            "Header parameters (getOperationSchema header_parameters). "
+            'Example: {"If-Match": "<_etag from GET>"}'
+        ),
+    },
+}
 
 
 def _score_operation(
@@ -110,8 +148,10 @@ class ToolGenerator:
         operations: list[OperationInfo],
         schemas: dict[str, Any] | None = None,
         namespace_metadata: dict[str, NamespaceMetadata] | None = None,
+        auto_etag: bool = False,
     ) -> None:
         self.operations = operations
+        self.auto_etag = auto_etag
         self._schemas = schemas or {}
         self._namespace_metadata = namespace_metadata or {}
         self._resolver = SchemaResolver(self._schemas)
@@ -128,12 +168,13 @@ class ToolGenerator:
     def build_namespace_tools(self) -> list[dict[str, Any]]:
         """Build ``<namespace>_execute`` tool schemas with D2 descriptions.
 
-        ``operation`` and ``request_body`` are the only explicitly typed properties.
-        Path, query, and header parameters are passed as flat top-level keys and
-        accepted via ``additionalProperties: true``. The exact parameter names and
-        body schema for any operation are obtained from ``getOperationSchema``.
-        ``request_body`` must be an explicit named property so the MCP client enforces
-        the object type and the LLM knows body fields belong there, not at top level.
+        Declared properties: ``operation``, ``request_body`` and the three parameter
+        buckets ``path_params``, ``query_params`` and ``headers``. The buckets must be
+        declared so strict MCP clients (e.g. Open WebUI) forward them instead of
+        dropping undeclared keys. ``additionalProperties: true`` is kept at the top
+        level so legacy clients that send parameters as flat keys keep working.
+        The exact parameter names and body schema for any operation are obtained
+        from ``getOperationSchema``.
         """
         tools: list[dict[str, Any]] = []
         for namespace, ops in sorted(self.group_by_namespace().items()):
@@ -155,6 +196,7 @@ class ToolGenerator:
                                 "Omit for GET/DELETE."
                             ),
                         },
+                        **{name: dict(prop) for name, prop in _BUCKET_PROPERTIES.items()},
                     },
                     required=["operation"],
                     additional_properties=True,
@@ -390,10 +432,8 @@ class ToolGenerator:
             elif param.location == "header":
                 if param.name == "NTNX-Request-Id":
                     formatted["auto_managed"] = "Auto-injected by server. No action needed."
-                elif param.name == "If-Match":
-                    formatted["auto_managed"] = (
-                        "Extract _etag value from the prior GET response of this resource."
-                    )
+                elif param.name.lower() == "if-match":
+                    formatted["auto_managed"] = self._if_match_guidance(op)
                 header_params.append(formatted)
 
         body_schema: Any = None
@@ -431,6 +471,11 @@ class ToolGenerator:
             "path_parameters": path_params,
             "query_parameters": query_params,
             "header_parameters": header_params,
+            "how_to_pass": {
+                "path_parameters": "path_params",
+                "query_parameters": "query_params",
+                "header_parameters": "headers",
+            },
             "request_body_required": body_required,
             "request_body_schema": body_schema,
             "immutable_fields": immutable_fields,
@@ -447,13 +492,47 @@ class ToolGenerator:
                 "PUT/PATCH requires the complete resource body. "
                 "1. GET the resource first. "
                 "2. Clone the full GET response body. "
-                "3. Strip '_etag' (use as If-Match header) and 'links'. "
+                "3. Strip '_etag' (pass as headers: {'If-Match': '<_etag>'}) and 'links'. "
                 "4. Modify only the fields the user asked to change. "
                 "5. Send the full cloned body. "
                 "Do NOT build the body incrementally from schema — omitting any field the "
                 "server expects will fail even if that field was not explicitly changed."
             )
         return result
+
+    def _if_match_guidance(self, op: OperationInfo) -> str:
+        """Describe how the If-Match header is supplied for this operation."""
+        if self.auto_etag and self.find_etag_source_operation(op) is not None:
+            return (
+                "Auto-fetched by the server when omitted (AUTO_ETAG enabled). "
+                "To pin a specific version, pass headers: {'If-Match': '<_etag from GET>'}."
+            )
+        return (
+            "Pass headers: {'If-Match': '<_etag>'} using the _etag value from the prior "
+            "GET response of this resource."
+        )
+
+    def find_etag_source_operation(self, op: OperationInfo) -> OperationInfo | None:
+        """Return the GET operation whose response carries the ETag for ``op``.
+
+        Action operations (``.../{extId}/$actions/<verb>``) read the ETag from the
+        parent resource; PUT/PATCH read it from their own path. The same namespace
+        is preferred when several GET operations share the path template.
+        """
+        if _ACTION_SUFFIX_RE.search(op.path):
+            resource_path = _ACTION_SUFFIX_RE.sub("", op.path)
+        elif op.method.upper() in ("PUT", "PATCH"):
+            resource_path = op.path
+        else:
+            return None
+        candidates = [
+            item for item in self.operations
+            if item.method.upper() == "GET" and item.path == resource_path
+        ]
+        if not candidates:
+            return None
+        same_namespace = [item for item in candidates if item.namespace == op.namespace]
+        return (same_namespace or candidates)[0]
 
     # OData query params whose values depend on response field names — guessing causes errors.
     @classmethod
@@ -487,12 +566,14 @@ class ToolGenerator:
         namespace: str,
         operation: str,
         request_payload: dict[str, Any],
+        strict: bool = True,
     ) -> None:
-        """Validate that the namespace and operation exist, and that request_body is an object.
+        """Validate namespace, operation, request_body type and parameter keys.
 
-        With ``additionalProperties: true`` on namespace tools, parameter key validation
-        is relaxed — the LLM is expected to supply only keys it learned from
-        ``getOperationSchema``. Unknown keys are silently ignored during dispatch.
+        Parameter buckets must be objects. With ``strict`` enabled (``STRICT_PARAMS``),
+        every supplied key — flat top-level or inside a bucket — must map to one of
+        the operation's parameters (exact name, OData alias, or bare OData name).
+        Unknown keys raise ``unknown_parameter`` instead of being silently dropped.
         """
         grouped = self.group_by_namespace()
         namespace_ops = grouped.get(namespace)
@@ -515,3 +596,41 @@ class ToolGenerator:
                     code="invalid_parameters",
                     detail="request_body must be an object when provided.",
                 )
+
+        for bucket in PARAM_BUCKETS:
+            value = request_payload.get(bucket)
+            if value is not None and not isinstance(value, dict):
+                raise ToolContractError(
+                    code="invalid_parameters",
+                    detail=f"{bucket} must be an object when provided.",
+                )
+
+        if not strict:
+            return
+
+        unknown = [
+            key if source == "top-level" else f"{source}.{key}"
+            for source, key in iter_supplied_keys(request_payload)
+            if not is_accepted_key(key, effective_parameters(target))
+        ]
+        if unknown:
+            raise ToolContractError(
+                code="unknown_parameter",
+                detail=(
+                    f"Unknown parameter(s) for operation '{operation}': {', '.join(unknown)}. "
+                    f"Accepted: {self._describe_accepted_keys(target)}. "
+                    "Check exact names with getOperationSchema."
+                ),
+            )
+
+    @staticmethod
+    def _describe_accepted_keys(op: OperationInfo) -> str:
+        """Summarize accepted keys per bucket for an unknown_parameter error."""
+        grouped: dict[str, list[str]] = {bucket: [] for bucket in PARAM_BUCKETS}
+        for param in effective_parameters(op):
+            bucket = bucket_for_location(param.location)
+            if bucket is not None:
+                grouped[bucket].append(param.name)
+        parts = [f"{bucket}: [{', '.join(names)}]" for bucket, names in grouped.items() if names]
+        parts.append(f"reserved: [{', '.join(sorted(RESERVED_KEYS))}]")
+        return "; ".join(parts)
