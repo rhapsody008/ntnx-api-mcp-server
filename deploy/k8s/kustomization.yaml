@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: nutanix-mcp
+labels:
+  - pairs:
+      app.kubernetes.io/name: nutanix-mcp
+      app.kubernetes.io/part-of: ntnx-api-mcp-server
+# The Secret is deliberately NOT listed here. Create it from secret.example.yaml
+# (see docs/k8s-deployment.md) so credentials never live in the kustomize tree.
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  # - ingress.yaml   # optional; copy ingress.example.yaml, external clients only, TLS required
+images:
+  - name: ghcr.io/rhapsody008/ntnx-api-mcp-server
+    newTag: latest

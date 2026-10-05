@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nutanix-mcp
+  labels:
+    app: nutanix-mcp
+spec:
+  # Scale out only with MCP_STATELESS=true, and switch the artifacts volume to
+  # ReadWriteMany or emptyDir first (the default PVC is ReadWriteOnce).
+  replicas: 1
+  # Recreate: a ReadWriteOnce PVC cannot be attached to old and new pods on different nodes.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: nutanix-mcp
+  template:
+    metadata:
+      labels:
+        app: nutanix-mcp
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: nutanix-mcp
+          image: ghcr.io/rhapsody008/ntnx-api-mcp-server:latest
+          imagePullPolicy: IfNotPresent
+          args: ["serve-http"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: nutanix-mcp-config
+            - secretRef:
+                name: nutanix-mcp-secrets
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              # Parsed specs for all namespaces are large; tune after observing usage.
+              memory: 1536Mi
+          # The HTTP listener starts only after `init` finishes (spec download), so a
+          # startupProbe gives it up to 10 minutes before liveness checks begin.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 120
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+            failureThreshold: 3
+          # /readyz turns 200 once specs are parsed and operations are loaded.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: artifacts
+              mountPath: /data/artifacts
+            - name: logs
+              mountPath: /data/logs
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: nutanix-mcp-artifacts
+        - name: logs
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

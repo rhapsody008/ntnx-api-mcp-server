@@ -59,6 +59,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-dir")
     parser.add_argument("--namespace-source-url")
     parser.add_argument("--namespace-override-list")
+    parser.add_argument(
+        "--read-only",
+        choices=["true", "false"],
+        help="Block non-GET operations server-side (env: READ_ONLY_MODE)",
+    )
+    parser.add_argument(
+        "--no-save-dotenv",
+        action="store_true",
+        help="Do not write resolved settings (including credentials) to ./.env after init/refresh",
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=False)
     subparsers.add_parser("init", help="Download YAMLs using namespace/version discovery")
@@ -78,6 +88,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "serve-stdio",
         help="Run MCP stdio server for Cursor/Claude/Inspector clients",
     )
+    http_parser = subparsers.add_parser(
+        "serve-http",
+        help="Run MCP Streamable HTTP server (for Open WebUI, Kubernetes, remote clients)",
+    )
+    http_parser.add_argument("--host", help="Bind host (env: MCP_HTTP_HOST, default 127.0.0.1)")
+    http_parser.add_argument("--port", type=int, help="Bind port (env: MCP_HTTP_PORT, default 8000)")
+    http_parser.add_argument("--path", help="MCP endpoint path (env: MCP_HTTP_PATH, default /mcp)")
     return parser
 
 
@@ -105,6 +122,15 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
         overrides["namespace_source_url"] = args.namespace_source_url
     if args.namespace_override_list is not None:
         overrides["namespace_override_list"] = args.namespace_override_list
+    if getattr(args, "read_only", None) is not None:
+        overrides["read_only_mode"] = args.read_only == "true"
+    # serve-http options; absent on other subcommands.
+    if getattr(args, "host", None) is not None:
+        overrides["http_host"] = args.host
+    if getattr(args, "port", None) is not None:
+        overrides["http_port"] = args.port
+    if getattr(args, "path", None) is not None:
+        overrides["http_path"] = args.path
     return overrides
 
 
@@ -169,7 +195,8 @@ def main() -> None:
             summary.failed,
             summary.duration_ms,
         )
-        _save_config_dotenv(settings)
+        if not getattr(args, "no_save_dotenv", False):
+            _save_config_dotenv(settings)
         print(
             json.dumps(
                 {
@@ -212,7 +239,8 @@ def main() -> None:
             summary.restored_artifacts,
             summary.duration_ms,
         )
-        _save_config_dotenv(settings)
+        if not getattr(args, "no_save_dotenv", False):
+            _save_config_dotenv(settings)
         print(
             json.dumps(
                 {
@@ -238,6 +266,12 @@ def main() -> None:
 
     if command == "serve-stdio":
         serve_stdio(settings)
+        return
+
+    if command == "serve-http":
+        from .mcp_http_server import serve_http
+
+        serve_http(settings)
         return
 
     if bool(getattr(args, "validate_only", False)):

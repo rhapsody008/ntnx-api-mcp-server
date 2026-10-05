@@ -27,8 +27,11 @@
 | Local development | Low | Ad-hoc testing, personal use, and exploratory use on a developer workstation | [§2 Local development](#2-local-development) |
 | Docker | Medium | Isolated, reproducible environments; CI pipelines; teams that standardise on containers | [§3 Docker](#3-docker) |
 | Bare metal / VM | Medium | Persistent service on a server or VM close to Prism Central; long-running deployments | [§4 Bare metal / VM](#4-bare-metal--vm) |
+| Kubernetes | Medium | Shared HTTP endpoint for Open WebUI or other in-cluster clients | [Kubernetes deployment guide](./k8s-deployment.md) |
 
-> The server communicates over **stdio only**. It does not open a TCP port. Every deployment method boils down to the same thing: an MCP client (Cursor, Claude Desktop, etc.) launches the `nutanix-mcp serve-stdio` process and pipes messages through its stdin/stdout.
+> The server supports two transports:
+> - **stdio** (`nutanix-mcp serve-stdio`): an MCP client (Cursor, Claude Desktop, etc.) launches the process and pipes messages through its stdin/stdout. No TCP port is opened.
+> - **Streamable HTTP** (`nutanix-mcp serve-http`): a long-running service listening on `MCP_HTTP_HOST:MCP_HTTP_PORT` with the MCP endpoint at `MCP_HTTP_PATH` (default `/mcp`), plus `/healthz` and `/readyz` probes. Set `MCP_AUTH_TOKEN` to require a bearer token.
 
 ---
 
@@ -122,72 +125,62 @@ The process blocks, reading MCP messages from stdin. Connect your MCP client to 
 
 ## 3. Docker
 
-> **No official Docker image is published yet.** The steps below describe how to build and run a local image from the repository source.
+A multi-stage, non-root `Dockerfile` is committed at the repository root. The image defaults to the Streamable HTTP transport (`serve-http` on port 8000) and can also run `serve-stdio`.
 
 ### 3.1 Requirements
 
 - Docker Engine 20.10 or later
 - Repository cloned locally
+- Internet access at build time if you bake specs into the image (the default)
 
-### 3.2 Create a Dockerfile
+### 3.2 What the image contains
 
-No `Dockerfile` is committed to the repository. Create one in the project root:
+| Item | Value |
+|---|---|
+| Base | `python:3.11-slim`, editable install of the package in `/app` |
+| User | UID `10001` (`mcp`), no shell, no home directory |
+| Bundled specs | Latest-release YAMLs baked into `/app/src/artifacts/default_specs` (`--build-arg BAKE_SPECS=false` to skip) |
+| Runtime dirs | `ARTIFACTS_DIR=/data/artifacts`, `LOG_DIR=/data/logs` |
+| Entrypoint | [`docker/entrypoint.sh`](../docker/entrypoint.sh): runs `nutanix-mcp init` when `INIT_ON_START=true` (default), then `exec nutanix-mcp "$@"` |
+| Default command | `serve-http` on `0.0.0.0:8000`, path `/mcp` |
 
-```dockerfile
-FROM python:3.11-slim
+The editable install is deliberate: bundled-spec paths resolve relative to `src/config/settings.py`, and a regular install would move them into `site-packages`.
 
-WORKDIR /app
-
-# Copy project files
-COPY pyproject.toml .
-COPY src/ src/
-
-# Install the package
-RUN pip install --no-cache-dir -e .
-
-# Artifacts and logs directories
-RUN mkdir -p /app/artifacts /app/logs
-
-# Run as non-root
-RUN useradd --system --no-create-home --shell /usr/sbin/nologin nutanix-mcp
-RUN chown -R nutanix-mcp:nutanix-mcp /app
-USER nutanix-mcp
-
-ENTRYPOINT ["nutanix-mcp"]
-CMD ["serve-stdio"]
-```
+`init` skips artifacts that already exist, so mounting a volume at `/data/artifacts` makes restarts fast. If `init` fails (for example, no egress to `developers.nutanix.com`), the server falls back to existing runtime specs, then the baked-in bundled specs. The entrypoint runs `init` with `--no-save-dotenv`, so credentials are never written to disk, and sends its output to stderr so it cannot corrupt the stdio protocol stream.
 
 ### 3.3 Build the image
 
 ```bash
-docker build -t nutanix-mcp:latest .
+make build                                  # tags $(IMAGE):<git-sha> and :latest
+make build PLATFORM=linux/amd64             # from Apple Silicon for an amd64 cluster
+docker build --build-arg BAKE_SPECS=false -t nutanix-mcp:dev .   # offline build
 ```
 
-### 3.4 Run the container
-
-Because the server uses stdio transport, the container must be launched by your MCP client as a subprocess, not as a standalone daemon. Pass credentials via environment variables; never bake them into the image.
-
-Example run command for manual testing (stdin/stdout attached):
+### 3.4 Run as an HTTP service
 
 ```bash
-docker run --rm -i \
-  -e PC_HOST=your-pc.example.com \
-  -e PC_PORT=9440 \
-  -e PC_USERNAME=your-username \
-  -e PC_PASSWORD=your-password \
-  -e PC_INSECURE=false \
-  -e ARTIFACTS_DIR=/app/artifacts \
-  -e LOG_DIR=/app/logs \
-  -v /host/path/artifacts:/app/artifacts \
-  nutanix-mcp:latest serve-stdio
+cat > .env.docker <<'ENV'
+PC_HOST=your-pc.example.com
+PC_PORT=9440
+PC_API_KEY=your-api-key
+PC_INSECURE=false
+READ_ONLY_MODE=true
+STRICT_PARAMS=true
+AUTO_ETAG=true
+MCP_AUTH_TOKEN=change-me-to-32-random-bytes
+ENV
+
+make run-local ENV_FILE=.env.docker         # docker run --rm -p 8000:8000 --env-file .env.docker ...
+make smoke                                  # curl /healthz and /readyz
 ```
 
-> `-i` keeps stdin open, which is required for stdio transport.
-> Mount a host volume for `artifacts/` so downloaded specs persist across container restarts.
+> Do not set `ARTIFACTS_DIR`, `LOG_DIR` or `MCP_HTTP_HOST` in the env file. The image defaults are correct for the container, while the `.env` written by a local `nutanix-mcp init` contains host paths.
 
-### 3.5 MCP client configuration with Docker
+Connect an MCP client to `http://localhost:8000/mcp` with the header `Authorization: Bearer <MCP_AUTH_TOKEN>`.
 
-Point your MCP client at `docker run` instead of `nutanix-mcp` directly. Example for Cursor (`~/.cursor/mcp.json`):
+### 3.5 Run as a stdio subprocess
+
+Override the command with `serve-stdio`. Keep `-i` so stdin stays open. Example for Cursor (`~/.cursor/mcp.json`):
 
 ```json
 {
@@ -198,12 +191,10 @@ Point your MCP client at `docker run` instead of `nutanix-mcp` directly. Example
         "run", "--rm", "-i",
         "-e", "PC_HOST=your-pc.example.com",
         "-e", "PC_PORT=9440",
-        "-e", "PC_USERNAME=your-username",
-        "-e", "PC_PASSWORD=your-password",
+        "-e", "PC_API_KEY=your-api-key",
         "-e", "PC_INSECURE=false",
-        "-e", "ARTIFACTS_DIR=/app/artifacts",
-        "-v", "/host/path/artifacts:/app/artifacts",
-        "nutanix-mcp:latest",
+        "-v", "nutanix-mcp-artifacts:/data/artifacts",
+        "ghcr.io/rhapsody008/ntnx-api-mcp-server:latest",
         "serve-stdio"
       ]
     }
@@ -213,20 +204,14 @@ Point your MCP client at `docker run` instead of `nutanix-mcp` directly. Example
 
 ### 3.6 Verify the container is working
 
-Run the validate-only check inside the container before wiring it to a client:
-
 ```bash
-docker run --rm \
-  -e PC_HOST=your-pc.example.com \
-  -e PC_USERNAME=your-username \
-  -e PC_PASSWORD=your-password \
-  -e PC_INSECURE=false \
-  -e ARTIFACTS_DIR=/app/artifacts \
-  -v /host/path/artifacts:/app/artifacts \
-  nutanix-mcp:latest run --validate-only
+docker run --rm --env-file .env.docker -e INIT_ON_START=false \
+  ghcr.io/rhapsody008/ntnx-api-mcp-server:latest run --validate-only
 ```
 
-A `"startup_ready": true` field in the JSON output confirms everything is working.
+For the HTTP service, `make smoke` should print `{"status":"ok"}` and `{"status":"ready","operation_count":N}`.
+
+For Kubernetes manifests, probes and the canary checks, see the [Kubernetes deployment guide](./k8s-deployment.md).
 
 ---
 
@@ -394,7 +379,9 @@ For JSON-formatted logs suitable for forwarding to a log aggregator, set `LOG_FO
 
 ### 5.1 Port the server listens on
 
-**None.** The server uses **stdio transport only** and does not bind to any TCP port. There is no HTTP endpoint, no socket, and nothing to expose through a firewall.
+With `serve-stdio`: **none**. The server does not bind to any TCP port.
+
+With `serve-http`: `MCP_HTTP_PORT` (default `8000`) on `MCP_HTTP_HOST` (default `127.0.0.1`; the container image uses `0.0.0.0`). Set `MCP_AUTH_TOKEN` and terminate TLS in front of it (Ingress or reverse proxy) before exposing it beyond a trusted network, because this server can write to Prism Central.
 
 ### 5.2 Outbound connectivity required
 
@@ -504,9 +491,14 @@ sudo chmod -R 750 /opt/nutanix-mcp/.venv
 
 ## 8. Health checks
 
-### 8.1 No HTTP health endpoint
+### 8.1 HTTP health endpoints (`serve-http` only)
 
-The server exposes **no HTTP endpoint** — it communicates via stdio only. There is no `/health`, `/ready`, or `/ping` route to poll.
+| Path | Behavior |
+|---|---|
+| `GET /healthz` | Liveness. Always `200 {"status":"ok"}` once the listener is up. |
+| `GET /readyz` | Readiness. `503 {"status":"loading"}` while specs are parsed, `200 {"status":"ready","operation_count":N}` once operations are loaded, `503 {"status":"failed","error":...}` if loading failed. |
+
+Both are unauthenticated. The MCP endpoint itself returns `503` until ready. With `serve-stdio` there is no HTTP endpoint; use the process-level checks below.
 
 ### 8.2 Process-level monitoring
 

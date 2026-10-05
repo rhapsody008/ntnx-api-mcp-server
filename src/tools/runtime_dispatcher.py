@@ -8,18 +8,16 @@ from typing import Any, Protocol
 
 from src.config import Settings
 from src.generators import ToolContractError, ToolGenerator
+from src.generators.param_routing import (
+    ODATA_ALIAS_MAP,
+    effective_parameters,
+    merge_supplied_parameters,
+    resolve_parameter_value,
+)
 from src.handlers import APIHandler
 from src.parsers import OperationInfo
 
-
-ODATA_ALIAS_MAP = {
-    "_page": "$page",
-    "_limit": "$limit",
-    "_filter": "$filter",
-    "_orderby": "$orderby",
-    "_select": "$select",
-    "_expand": "$expand",
-}
+__all__ = ["ODATA_ALIAS_MAP", "RuntimeToolDispatcher", "ToolDispatchResult"]
 
 LOGGER = logging.getLogger(__name__)
 
@@ -179,7 +177,9 @@ class RuntimeToolDispatcher:
             )
 
         try:
-            self.generator.validate_namespace_operation_request(namespace, operation_id, args)
+            self.generator.validate_namespace_operation_request(
+                namespace, operation_id, args, strict=self.settings.strict_params
+            )
         except ToolContractError as exc:
             return ToolDispatchResult(
                 ok=False,
@@ -212,13 +212,11 @@ class RuntimeToolDispatcher:
         query_params: dict[str, Any] = {}
         headers: dict[str, Any] = {}
 
-        for parameter in operation.parameters:
+        # Route by the spec's parameter location, not by the bucket the value arrived in.
+        supplied = merge_supplied_parameters(args)
+        for parameter in effective_parameters(operation):
             param_name = parameter.name
-            if param_name in args:
-                value = args[param_name]
-            else:
-                value = args.get(self._get_alias_for_parameter(param_name))
-
+            value = resolve_parameter_value(parameter, supplied)
             if value is None:
                 continue
             if parameter.location == "path":
@@ -235,6 +233,11 @@ class RuntimeToolDispatcher:
                 tool=f"{namespace}_execute",
                 error={"code": "invalid_arguments", "detail": "'request_body' must be an object."},
             )
+
+        if self.settings.auto_etag:
+            etag_error = self._inject_auto_etag(operation, path_params, headers)
+            if etag_error is not None:
+                return ToolDispatchResult(ok=False, tool=f"{namespace}_execute", error=etag_error)
 
         try:
             payload = self.api_handler.execute_request(
@@ -260,9 +263,60 @@ class RuntimeToolDispatcher:
                 return operation
         return None
 
-    @staticmethod
-    def _get_alias_for_parameter(param_name: str) -> str | None:
-        for alias, original in ODATA_ALIAS_MAP.items():
-            if original == param_name:
-                return alias
+    def _inject_auto_etag(
+        self,
+        operation: OperationInfo,
+        path_params: dict[str, Any],
+        headers: dict[str, Any],
+    ) -> dict[str, str] | None:
+        """Fetch the resource ETag and set If-Match when the caller did not supply one.
+
+        Returns an error dict when the ETag lookup fails, otherwise ``None``. When no
+        matching GET operation exists the request proceeds unchanged and Prism Central
+        reports the missing If-Match as before.
+        """
+        if_match = next(
+            (p for p in operation.parameters if p.location == "header" and p.name.lower() == "if-match"),
+            None,
+        )
+        if if_match is None or any(key.lower() == "if-match" for key in headers):
+            return None
+
+        source = self.generator.find_etag_source_operation(operation)
+        if source is None:
+            LOGGER.info(
+                "event=auto_etag_skipped operation=%s reason=no_matching_get",
+                operation.registered_name,
+            )
+            return None
+
+        source_path_names = {p.name for p in source.parameters if p.location == "path"}
+        try:
+            current = self.api_handler.execute_request(
+                method="GET",
+                path=source.path,
+                path_params={k: v for k, v in path_params.items() if k in source_path_names},
+            )
+        except Exception as exc:
+            return {
+                "code": "auto_etag_failed",
+                "detail": f"ETag lookup via '{source.registered_name}' failed: {exc}",
+            }
+
+        etag = current.get("_etag") if isinstance(current, dict) else None
+        if not etag:
+            return {
+                "code": "auto_etag_failed",
+                "detail": (
+                    f"ETag lookup via '{source.registered_name}' returned no _etag. "
+                    f"Response: {str(current)[:500]}"
+                ),
+            }
+
+        headers[if_match.name] = etag
+        LOGGER.info(
+            "event=auto_etag_injected operation=%s source=%s",
+            operation.registered_name,
+            source.registered_name,
+        )
         return None

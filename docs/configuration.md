@@ -91,6 +91,27 @@ NAMESPACE_SOURCE_URL=https://developers.nutanix.com/api/v1/namespaces
 # false = write operations allowed — set explicitly to opt in to create/update/delete
 READ_ONLY_MODE=true
 
+# Reject unknown parameter keys with an unknown_parameter error (lists accepted names)
+# instead of silently dropping them.
+STRICT_PARAMS=true
+
+# When a write needs If-Match and the caller omits it, fetch the resource's current
+# ETag server-side and inject it. Saves the model a GET per resource, but drops
+# optimistic-concurrency protection between the model's earlier read and its write.
+AUTO_ETAG=false
+
+# ── Streamable HTTP transport (nutanix-mcp serve-http) ────────────────────────
+MCP_HTTP_HOST=127.0.0.1
+MCP_HTTP_PORT=8000
+MCP_HTTP_PATH=/mcp
+# Bearer token required on the MCP path when set. Strongly recommended for any
+# non-loopback bind: this server can write to Prism Central.
+# Generate with: openssl rand -base64 32
+MCP_AUTH_TOKEN=
+# true = stateless mode with JSON responses (required for >1 replica without
+# sticky sessions); false = session-based mode with SSE streams.
+MCP_STATELESS=false
+
 ```
 
 The same keys can be placed in a `.json`, `.yaml`/`.yml`, or `.toml` file and passed via
@@ -111,6 +132,13 @@ log_dir                = "/home/user/.nutanix-mcp/logs"
 namespace_source_url   = "https://developers.nutanix.com/api/v1/namespaces"
 # namespace_override_list = "aiops,vmm,prism"  # uncomment to restrict namespaces
 read_only_mode         = true
+strict_params          = true
+auto_etag              = false
+http_host              = "127.0.0.1"
+http_port              = 8000
+http_path              = "/mcp"
+# mcp_auth_token       = "..."   # prefer the MCP_AUTH_TOKEN env var for secrets
+mcp_stateless          = false
 ```
 
 ---
@@ -148,7 +176,19 @@ directory (loaded automatically via `pydantic-settings`). Variable names are cas
 | `ARTIFACTS_DIR` | Directory for downloaded OpenAPI YAML files; created on startup. **Use an absolute path** in AI client config files. | No | `<project_root>/artifacts` | `/opt/nutanix-mcp/artifacts` |
 | `NAMESPACE_SOURCE_URL` | Namespace-list discovery endpoint | No | `https://developers.nutanix.com/api/v1/namespaces` | *(use default)* |
 | `NAMESPACE_OVERRIDE_LIST` | Comma-separated list of namespace names to load. When set, only these namespaces are fetched and registered as tools — all others are skipped. Useful for air-gapped environments or when only a subset of namespaces is needed. | No | *(none — all available namespaces loaded)* | `aiops,vmm,prism` |
-| `READ_ONLY_MODE` | When `"true"`, all non-GET operations are rejected server-side before reaching Prism Central | No | `"true"` | `"false"` |
+| `READ_ONLY_MODE` | When `"true"`, all non-GET operations are rejected server-side before reaching Prism Central. CLI: `--read-only true\|false` | No | `"true"` | `"false"` |
+| `STRICT_PARAMS` | When `"true"`, parameter keys that match no parameter of the operation (top-level or inside `path_params` / `query_params` / `headers`) return `unknown_parameter`, listing the accepted names. When `"false"`, they are silently dropped. | No | `"true"` | `"false"` |
+| `AUTO_ETAG` | When `"true"` and a PUT/PATCH or `$actions` operation requires `If-Match` but none was supplied, the server GETs the resource and injects its ETag. Trade-off: no optimistic-concurrency protection between the model's earlier read and its write. | No | `"false"` | `"true"` |
+
+### HTTP transport (`serve-http`)
+
+| Variable | Description | Required | Default | Example |
+|---|---|---|---|---|
+| `MCP_HTTP_HOST` | Bind address. CLI: `serve-http --host` | No | `127.0.0.1` (image: `0.0.0.0`) | `0.0.0.0` |
+| `MCP_HTTP_PORT` | Bind port. CLI: `serve-http --port` | No | `8000` | `8080` |
+| `MCP_HTTP_PATH` | Path of the MCP endpoint. CLI: `serve-http --path` | No | `/mcp` | `/nutanix/mcp` |
+| `MCP_AUTH_TOKEN` | When set, the MCP path requires `Authorization: Bearer <token>`. `/healthz` and `/readyz` stay open. | No | *(unset — no auth)* | *(32+ random bytes)* |
+| `MCP_STATELESS` | `"true"`: stateless Streamable HTTP with JSON responses, required for more than one replica without sticky sessions. `"false"`: session-based with SSE. | No | `"false"` | `"true"` |
 
 ### Logging
 

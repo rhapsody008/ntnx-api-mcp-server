@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping
 
 import yaml
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .constants import (
@@ -60,6 +60,30 @@ class Settings(BaseSettings):
         default=True,
         description="When true, reject all non-GET operations before they reach Prism Central",
     )
+    strict_params: bool = Field(
+        default=True,
+        description="When true, unknown parameter keys return unknown_parameter instead of being dropped",
+    )
+    auto_etag: bool = Field(
+        default=False,
+        description=(
+            "When true, fetch the resource ETag server-side and inject If-Match when the "
+            "caller omits it (trades away optimistic-concurrency protection)"
+        ),
+    )
+
+    # Streamable HTTP transport
+    http_host: str = Field(default="127.0.0.1", description="HTTP bind host")
+    http_port: int = Field(default=8000, ge=1, le=65535, description="HTTP bind port")
+    http_path: str = Field(default="/mcp", description="HTTP path of the MCP endpoint")
+    mcp_auth_token: SecretStr | None = Field(
+        default=None,
+        description="When set, require 'Authorization: Bearer <token>' on the MCP endpoint",
+    )
+    mcp_stateless: bool = Field(
+        default=False,
+        description="Stateless Streamable HTTP with JSON responses (required for >1 replica)",
+    )
 
     # Logging
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
@@ -99,6 +123,23 @@ class Settings(BaseSettings):
             for value in self.namespace_override_list.split(",")
             if value.strip()
         ]
+
+    @field_validator("http_path")
+    @classmethod
+    def validate_http_path(cls, value: str) -> str:
+        """Normalize the MCP path to a leading slash and no trailing slash."""
+        normalized = "/" + value.strip().strip("/")
+        if normalized == "/":
+            raise ValueError("MCP_HTTP_PATH must not be '/'; use a sub-path such as /mcp.")
+        return normalized
+
+    @field_validator("mcp_auth_token")
+    @classmethod
+    def blank_token_is_unset(cls, value: SecretStr | None) -> SecretStr | None:
+        """Treat an empty MCP_AUTH_TOKEN as unset rather than as an empty bearer token."""
+        if value is not None and not value.get_secret_value().strip():
+            return None
+        return value
 
     @model_validator(mode="after")
     def validate_paths(self) -> "Settings":
@@ -183,6 +224,13 @@ def _build_env_payload() -> dict[str, Any]:
         "NAMESPACE_SOURCE_URL": "namespace_source_url",
         "NAMESPACE_OVERRIDE_LIST": "namespace_override_list",
         "READ_ONLY_MODE": "read_only_mode",
+        "STRICT_PARAMS": "strict_params",
+        "AUTO_ETAG": "auto_etag",
+        "MCP_HTTP_HOST": "http_host",
+        "MCP_HTTP_PORT": "http_port",
+        "MCP_HTTP_PATH": "http_path",
+        "MCP_AUTH_TOKEN": "mcp_auth_token",
+        "MCP_STATELESS": "mcp_stateless",
     }
     env_payload: dict[str, Any] = {}
     for env_key, field_name in env_keys.items():

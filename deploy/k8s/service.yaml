@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: nutanix-mcp
+  labels:
+    app: nutanix-mcp
+spec:
+  type: ClusterIP
+  selector:
+    app: nutanix-mcp
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

@@ -11,7 +11,12 @@ requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Nutanix" }]
 dependencies = [
-    "mcp>=1.0.0,<2.0.0",
+    # 1.8.0 is the first release with StreamableHTTPSessionManager.
+    "mcp>=1.8.0,<2.0.0",
+    # Imported directly by the HTTP transport (also transitive deps of mcp).
+    "anyio>=4.5",
+    "starlette>=0.27",
+    "uvicorn>=0.23.1",
     "httpx>=0.28.0",
     "pyyaml>=6.0",
     "pydantic>=2.0.0",

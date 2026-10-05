@@ -1,0 +1,27 @@
+# Optional. Only expose the MCP endpoint outside the cluster when a client there
+# needs it, and only over TLS with MCP_AUTH_TOKEN set (this server can write to Prism).
+# Copy to ingress.yaml, adjust host/class/TLS secret, and uncomment it in kustomization.yaml.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nutanix-mcp
+  annotations:
+    # Streamable HTTP may hold SSE responses open; raise proxy timeouts (ingress-nginx shown).
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["nutanix-mcp.example.com"]
+      secretName: nutanix-mcp-tls
+  rules:
+    - host: nutanix-mcp.example.com
+      http:
+        paths:
+          - path: /mcp
+            pathType: Exact
+            backend:
+              service:
+                name: nutanix-mcp
+                port:
+                  name: http
