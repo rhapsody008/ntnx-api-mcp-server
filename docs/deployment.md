@@ -141,10 +141,12 @@ A multi-stage, non-root `Dockerfile` is committed at the repository root. The im
 | User | UID `10001` (`mcp`), no shell, no home directory |
 | Bundled specs | Latest-release YAMLs baked into `/app/src/artifacts/default_specs` (`--build-arg BAKE_SPECS=false` to skip) |
 | Runtime dirs | `ARTIFACTS_DIR=/data/artifacts`, `LOG_DIR=/data/logs` |
-| Entrypoint | [`docker/entrypoint.sh`](../docker/entrypoint.sh): runs `nutanix-mcp init` when `INIT_ON_START=true` (default), then `exec nutanix-mcp "$@"` |
+| Entrypoint | [`docker/entrypoint.sh`](../docker/entrypoint.sh): runs `nutanix-mcp init` when `INIT_ON_START=true` (default) **and** `ARTIFACTS_DIR` is writable, then `exec nutanix-mcp "$@"` |
 | Default command | `serve-http` on `0.0.0.0:8000`, path `/mcp` |
 
 The editable install is deliberate: bundled-spec paths resolve relative to `src/config/settings.py`, and a regular install would move them into `site-packages`.
+
+The image runs fine with a read-only root filesystem and no volumes at all: it serves the baked-in bundled specs, skips the spec download, and logs to stderr only. Mount writable volumes only when you want fresh specs or log files on disk.
 
 `init` skips artifacts that already exist, so mounting a volume at `/data/artifacts` makes restarts fast. If `init` fails (for example, no egress to `developers.nutanix.com`), the server falls back to existing runtime specs, then the baked-in bundled specs. The entrypoint runs `init` with `--no-save-dotenv`, so credentials are never written to disk, and sends its output to stderr so it cannot corrupt the stdio protocol stream.
 

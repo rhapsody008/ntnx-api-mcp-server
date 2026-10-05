@@ -96,7 +96,7 @@ kubectl -n nutanix-mcp create secret generic nutanix-mcp-secrets \
 
 ### 3.2 ConfigMap
 
-Edit `deploy/k8s/configmap.yaml`. At minimum, set `PC_HOST` and `PC_INSECURE`. Keep `READ_ONLY_MODE: "true"` until the canary in §6 passes.
+Edit `deploy/k8s/configmap.yaml`. At minimum, set `PC_HOST` and `PC_INSECURE`. Keep `READ_ONLY_MODE: "true"` until the canary in §7 passes.
 
 ---
 
@@ -144,9 +144,31 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST localhost:8000/mcp          # 4
 
 ---
 
-## 6. Canary verification
+## 6. Troubleshooting
 
-### 6.1 MCP Inspector over HTTP
+### Pod logs `Read-only file system` and never becomes ready
+
+Older builds crashed at startup when `/data/logs` was not writable, because the per-restart log file could not be created. Current builds degrade instead: file logging is skipped with a `file_logging_disabled` warning, and logs continue to stderr for `kubectl logs`. Rebuild from this branch if you see that traceback.
+
+### Startup takes minutes before the port opens
+
+With `INIT_ON_START=true` and no writable volume at `/data/artifacts`, the entrypoint used to download all 20 specs and fail to write every one — roughly two wasted minutes per restart. It now detects the unwritable directory and serves the bundled specs immediately. Either outcome is safe, but for a pod with no artifacts volume set `INIT_ON_START: "false"` to make the intent explicit.
+
+### Choosing volumes
+
+| Setup | Behavior |
+|---|---|
+| No volumes, `readOnlyRootFilesystem: true` | Bundled specs only, stderr logs, ready in seconds. Simplest option. |
+| emptyDir at `/data/artifacts` | Specs re-downloaded on every pod start (adds minutes). |
+| PVC at `/data/artifacts` (the default here) | Specs downloaded once, reused across restarts. |
+
+A writable `/data/logs` is never required. `kubectl logs` reads stderr either way.
+
+---
+
+## 7. Canary verification
+
+### 7.1 MCP Inspector over HTTP
 
 ```bash
 npx @modelcontextprotocol/inspector
@@ -162,13 +184,13 @@ In the Inspector UI, choose transport **Streamable HTTP**, URL `http://localhost
 
 If the first two checks return your whole VM list, the filter is being dropped. Check that the server runs this build and that the client re-synced its tool list.
 
-### 6.2 Open WebUI
+### 7.2 Open WebUI
 
 1. In Open WebUI, add an MCP tool server (Streamable HTTP) pointing at `http://nutanix-mcp.nutanix-mcp.svc:8000/mcp` with bearer auth set to `MCP_AUTH_TOKEN`.
 2. Re-sync the tools so Open WebUI picks up the new `path_params` / `query_params` / `headers` properties.
-3. Rerun the three canary checks from §6.1 through a chat prompt, for example: *"List AHV VMs whose name starts with zzz-nomatch."* The answer must be zero VMs, not the full inventory.
+3. Rerun the three canary checks from §7.1 through a chat prompt, for example: *"List AHV VMs whose name starts with zzz-nomatch."* The answer must be zero VMs, not the full inventory.
 
-### 6.3 Write path with server-side ETag
+### 7.3 Write path with server-side ETag
 
 1. Set `READ_ONLY_MODE: "false"` and `AUTO_ETAG: "true"` in the ConfigMap. Run `make k8s-apply`, then `kubectl -n nutanix-mcp rollout restart deploy/nutanix-mcp`.
 2. Ask the model to associate a test category with one test VM. It should call the associate-categories action with only `path_params` and `request_body`, with no GET of its own and no `If-Match`.

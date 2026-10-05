@@ -18,6 +18,10 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 - `Dockerfile`, `docker/entrypoint.sh`, `Makefile` and Kustomize manifests in `deploy/k8s/`.
 - GitHub Actions workflow that tests, builds, smoke-tests and publishes the container image to GHCR, tagging `:latest` and the commit sha.
 
+### Fixed
+- Startup no longer crashes when `LOG_DIR` is not writable (a read-only root filesystem with no mounted volume raises `OSError`/EROFS, which the previous `PermissionError` handler did not catch). File logging is skipped with a warning and stderr logging continues.
+- The container entrypoint skips the spec download when `ARTIFACTS_DIR` is not writable, instead of fetching all specs and failing to write each one. Startup drops from minutes to seconds for pods that rely on bundled specs.
+
 ### Changed
 - Minimum `mcp` version is now 1.8.0.
 - Tool calls are dispatched in a worker thread so Prism Central requests do not block the event loop.
