@@ -134,8 +134,14 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
     return overrides
 
 
-def _configure_logging(log_level: str, log_format: str, log_dir: Path) -> Path:
-    """Configure standard-library logging handlers for CLI/runtime."""
+def _configure_logging(log_level: str, log_format: str, log_dir: Path) -> Path | None:
+    """Configure logging handlers. The per-restart log file is best effort.
+
+    stderr always receives logs — that is what ``kubectl logs`` and MCP clients read.
+    An unwritable LOG_DIR (a read-only root filesystem with no volume mounted at
+    /data/logs, for example) degrades to stderr-only rather than failing startup.
+    Returns the log file path, or ``None`` when only stderr logging is active.
+    """
     level = getattr(logging, log_level.upper(), logging.INFO)
     if log_format == "json":
         formatter = (
@@ -144,14 +150,28 @@ def _configure_logging(log_level: str, log_format: str, log_dir: Path) -> Path:
         )
     else:
         formatter = "%(asctime)s %(levelname)s %(name)s %(message)s"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    log_path = log_dir / f"nutanix-mcp-{timestamp}.log"
-    handlers: list[logging.Handler] = [
-        logging.StreamHandler(),
-        logging.FileHandler(log_path, encoding="utf-8"),
-    ]
+
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    log_path: Path | None = None
+    file_error: OSError | None = None
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        candidate = log_dir / f"nutanix-mcp-{timestamp}.log"
+        handlers.append(logging.FileHandler(candidate, encoding="utf-8"))
+        log_path = candidate
+    except OSError as exc:
+        # Covers EROFS (read-only filesystem), EACCES and ENOENT.
+        file_error = exc
+
     logging.basicConfig(level=level, format=formatter, handlers=handlers, force=True)
+    if file_error is not None:
+        LOGGER.warning(
+            "event=file_logging_disabled log_dir=%s error=%s "
+            "detail=continuing with stderr logging only",
+            log_dir,
+            file_error,
+        )
     return log_path
 
 

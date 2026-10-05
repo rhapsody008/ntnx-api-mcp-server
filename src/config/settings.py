@@ -162,15 +162,22 @@ class Settings(BaseSettings):
                 raise ValueError(
                     f"Artifacts directory is not writable: {self.artifacts_dir}"
                 ) from exc
-        if not self.default_artifacts_dir.exists():
-            self.default_artifacts_dir.mkdir(parents=True, exist_ok=True)
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        if not self.default_artifacts_dir.is_dir():
-            raise ValueError(
-                f"Bundled default specs path is not a directory: {self.default_artifacts_dir}"
-            )
-        if not self.log_dir.is_dir():
-            raise ValueError(f"Log directory is not a directory: {self.log_dir}")
+        except OSError:
+            # Read-only filesystem (EROFS) and similar: startup continues because the
+            # server can still serve bundled specs. Downloads fail later, by design.
+            pass
+
+        for label, directory in (
+            ("Bundled default specs", self.default_artifacts_dir),
+            ("Log", self.log_dir),
+        ):
+            if directory.exists() and not directory.is_dir():
+                raise ValueError(f"{label} path is not a directory: {directory}")
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                # Unwritable: bundled specs may be absent and file logging is skipped.
+                pass
         return self
 
 
