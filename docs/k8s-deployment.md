@@ -169,6 +169,16 @@ Current images default to `serve-http` when `args` is empty and log `no subcomma
 
 With `INIT_ON_START=true` and no writable volume at `/data/artifacts`, the entrypoint used to download all 20 specs and fail to write every one — roughly two wasted minutes per restart. It now detects the unwritable directory and serves the bundled specs immediately. Either outcome is safe, but for a pod with no artifacts volume set `INIT_ON_START: "false"` to make the intent explicit.
 
+### Client times out sending `notifications/initialized` behind Cloudflare Tunnel
+
+Symptom: the client (for example an NAI MCP connector) fails after about 15 seconds with `sending "notifications/initialized": ... context canceled`. The server logs `POST /mcp 200`, then `GET /mcp 200`, then `DELETE /mcp 405`, with no `tools/list` in between.
+
+Cause: older builds answered the standalone `GET /mcp` in stateless mode with an SSE stream that stays silent until the first keep-alive ping, 15 seconds later. Cloudflare holds the response headers until the first body byte, so the client waits about 15 seconds for the `200` and gives up. Current builds return `405` at once in stateless mode, and clients continue without the stream. Upgrade the image. To check through the proxy:
+
+```bash
+curl -s -o /dev/null -H 'Accept: text/event-stream' -w '%{http_code} %{time_starttransfer}s\n' https://<host>/mcp   # 405 in well under a second
+```
+
 ### Choosing volumes
 
 | Setup | Behavior |

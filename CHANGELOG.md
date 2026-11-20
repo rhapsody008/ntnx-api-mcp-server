@@ -19,6 +19,11 @@ All notable changes are documented here. Format follows [Keep a Changelog](https
 - GitHub Actions workflow that tests, builds, smoke-tests and publishes the container image to GHCR, tagging `:latest` and the commit sha.
 
 ### Fixed
+- In stateless mode (`MCP_STATELESS=true`), `GET /mcp` now returns 405 at once instead of
+  opening an idle SSE stream. Behind Cloudflare Tunnel the idle stream's response headers
+  were held until the first keep-alive ping (15s), so clients that wait on the stream
+  before sending `notifications/initialized` (e.g. NAI MCP connectors) timed out and never
+  listed tools.
 - `AUTO_ETAG` now fires for writes whose spec omits `If-Match`, which includes the AHV
   category and power actions in vmm v4.3 (`ahv_associateCategories`, `ahv_powerOnVm` and
   38 others). Prism Central enforces the ETag on these regardless of the spec, so

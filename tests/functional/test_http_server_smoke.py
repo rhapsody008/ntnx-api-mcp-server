@@ -126,6 +126,19 @@ def test_serve_http_probes_and_auth(http_server: str) -> None:
     assert unauthorized.status_code == 401
 
 
+def test_serve_http_standalone_get(http_server: str, request: pytest.FixtureRequest) -> None:
+    """Stateless mode answers the standalone SSE GET with 405 at once instead of an idle stream."""
+    if request.node.callspec.params["http_server"] != "true":
+        pytest.skip("stateful mode keeps the SDK's GET handling")
+    response = httpx.get(
+        f"{http_server}/mcp",
+        headers={"Authorization": f"Bearer {TOKEN}", "Accept": "text/event-stream"},
+        timeout=5,
+    )
+    assert response.status_code == 405
+    assert response.headers["allow"] == "POST, DELETE"
+
+
 def test_serve_http_initialize_list_and_call(http_server: str) -> None:
     init, tools, bogus = anyio.run(_run_session, f"{http_server}/mcp")
 

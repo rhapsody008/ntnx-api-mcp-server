@@ -56,10 +56,24 @@ class _BearerAuth:
 class _MCPEndpoint:
     """ASGI endpoint that forwards to the session manager once specs are loaded."""
 
-    def __init__(self, state: _RuntimeState) -> None:
+    def __init__(self, state: _RuntimeState, stateless: bool) -> None:
         self.state = state
+        self.stateless = stateless
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if self.stateless and scope.get("method") == "GET":
+            # A stateless server has no session to push messages on, so the standalone
+            # GET stream would stay silent until the first SSE keep-alive ping (15s).
+            # Proxies that hold response headers until the first body byte (Cloudflare
+            # Tunnel) then delay the 200 past client timeouts. The spec allows 405 here,
+            # and clients carry on without the stream.
+            response = JSONResponse(
+                {"error": "method_not_allowed", "detail": "No standalone SSE stream in stateless mode."},
+                status_code=405,
+                headers={"Allow": "POST, DELETE"},
+            )
+            await response(scope, receive, send)
+            return
         if self.state.manager is None:
             detail = self.state.error or "Server is still loading API specs."
             response = JSONResponse({"error": "not_ready", "detail": detail}, status_code=503)
@@ -116,7 +130,7 @@ def build_http_app(settings: Settings) -> Starlette:
             {"status": "ready", "operation_count": len(state.dispatcher.load_result.operations)}
         )
 
-    mcp_endpoint: ASGIApp = _MCPEndpoint(state)
+    mcp_endpoint: ASGIApp = _MCPEndpoint(state, stateless=settings.mcp_stateless)
     if settings.mcp_auth_token is not None:
         mcp_endpoint = _BearerAuth(mcp_endpoint, settings.mcp_auth_token.get_secret_value())
 
